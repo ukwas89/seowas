@@ -1,20 +1,17 @@
-# streamlit_app.py (updated with heading clustering)
-# -------------------------------------------------------------
-# Same as before, but competitor headings are now deduplicated
-# and clustered with fuzzy matching so the content brief is cleaner.
-# -------------------------------------------------------------
+# streamlit_app.py (with adjustable heading clustering threshold)
+# -----------------------------------------------------------------
+# Added a sidebar slider to adjust heading clustering similarity.
+# -----------------------------------------------------------------
 
 import io
 import json
 import re
-import time
-from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Dict, List, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
-from difflib import SequenceMatcher
 
 # ----------------------------
 # CONFIG
@@ -26,24 +23,10 @@ st.set_page_config(
 )
 
 st.title("📈 SEO SERP Analyzer & Content Brief")
-st.caption("Search a keyword via SerpAPI, analyze SERP & PAA, crawl competitor headings, and generate a clustered SEO content brief.")
+st.caption("Analyze SERP & competitors, cluster headings, and build an SEO content brief.")
 
 SERP_API_ENDPOINT = "https://serpapi.com/search.json"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-HEADERS = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
-
-# ----------------------------
-# INTENT RULES
-# ----------------------------
-INTENT_RULES = [
-    {"label": "Transactional", "match": [r"\bbuy\b", r"price|pricing|cost", r"coupon|deal|discount", r"\bbest\b", r"\bvs\b"]},
-    {"label": "Commercial", "match": [r"\bbest\b", r"\btop\b", r"review|compare", r"alternatives?", r"software|tools?"]},
-    {"label": "Informational", "match": [r"what|how|why|guide|tutorial|examples?|learn|definition"]},
-    {"label": "Navigational", "match": [r"login|dashboard|official|homepage|site|download"]},
-]
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ----------------------------
 # UTILS
@@ -62,18 +45,6 @@ def get_serp(keyword: str, api_key: str, hl: str = "en", gl: str = "us", num: in
     r = requests.get(SERP_API_ENDPOINT, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
-
-def infer_intent(texts: List[str]) -> Tuple[str, Dict[str, int]]:
-    scores = {"Informational": 0, "Commercial": 0, "Transactional": 0, "Navigational": 0}
-    for t in texts:
-        if not t:
-            continue
-        for rule in INTENT_RULES:
-            for pattern in rule["match"]:
-                if re.search(pattern, t, flags=re.I):
-                    scores[rule["label"]] += 1
-    label = max(scores.items(), key=lambda kv: kv[1])[0]
-    return label, scores
 
 def extract_headings_from_html(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -112,28 +83,17 @@ def cluster_headings(all_headings: List[str], threshold: float = 0.75) -> List[s
                 break
         if not placed:
             clusters.append([h])
-    # use first heading as representative
     return [cluster[0] for cluster in clusters]
 
 # ----------------------------
 # CONTENT BRIEF BUILDER
 # ----------------------------
-def build_outline(keyword: str, paa: List[str], pasf: List[str], competitor_headings: List[Dict], intent_label: str) -> Dict:
-    title_suffix = {
-        "Informational": "Complete Guide",
-        "Commercial": "Top Picks, Comparisons & FAQs",
-        "Transactional": "Pricing, Options & How to Choose",
-        "Navigational": "Everything You Need to Know",
-    }.get(intent_label, "Complete Guide")
+def build_outline(keyword: str, paa: List[str], pasf: List[str], competitor_headings: List[Dict], threshold: float) -> Dict:
+    outline = [{"level": 1, "title": f"{keyword}: Complete Guide"}]
 
-    title = f"{keyword}: {title_suffix}"
-    meta = f"Actionable, up-to-date guide to {keyword}. Covers key questions, comparisons, and tips to match user intent."
-
-    outline = [{"level": 1, "title": title}]
-
-    # Gather all competitor headings and cluster them
+    # Gather competitor headings and cluster them
     all_heads = [h["title"] for comp in competitor_headings for h in comp.get("headings", [])]
-    clustered = cluster_headings(all_heads, threshold=0.72)
+    clustered = cluster_headings(all_heads, threshold)
 
     if clustered:
         outline.append({"level": 2, "title": "Competitor Heading Themes"})
@@ -153,10 +113,10 @@ def build_outline(keyword: str, paa: List[str], pasf: List[str], competitor_head
     outline.append({"level": 2, "title": "Conclusion"})
     outline.append({"level": 3, "title": f"Key takeaways about {keyword}"})
 
-    return {"title": title, "meta": meta, "outline": outline}
+    return {"title": f"{keyword}: Content Brief", "outline": outline}
 
 def outline_to_markdown(brief: Dict) -> str:
-    md = f"# {brief['title']}\n\n> {brief['meta']}\n\n"
+    md = f"# {brief['title']}\n\n"
     for item in brief["outline"]:
         md += f"{'#' * item['level']} {item['title']}\n\n"
     return md
@@ -166,12 +126,12 @@ def outline_to_markdown(brief: Dict) -> str:
 # ----------------------------
 with st.sidebar:
     st.header("Settings")
-    default_key = st.secrets.get("SERPAPI_KEY", "") if hasattr(st, "secrets") else ""
-    api_key = st.text_input("SerpAPI Key", type="password", value=default_key)
+    api_key = st.text_input("SerpAPI Key", type="password", value=st.secrets.get("SERPAPI_KEY", ""))
     keyword = st.text_input("Keyword", placeholder="e.g., best project management software")
     col1, col2 = st.columns(2)
     with col1: hl = st.text_input("hl (language)", value="en")
     with col2: gl = st.text_input("gl (country)", value="us")
+    threshold = st.slider("Heading Cluster Threshold", min_value=0.5, max_value=0.95, value=0.75, step=0.01)
     run_btn = st.button("Run Analysis", type="primary")
 
 # ----------------------------
@@ -193,13 +153,6 @@ if run_btn:
     st.subheader("Top 10 Organic Results")
     st.dataframe([{"#": i+1, **o} for i,o in enumerate(organic)], use_container_width=True, hide_index=True)
 
-    if paa: st.subheader("People Also Ask"); st.write("\n".join([f"• {q}" for q in paa]))
-    if pasf: st.subheader("People Also Search For"); st.write("\n".join([f"• {t}" for t in pasf]))
-
-    texts = [keyword] + [x["title"] for x in organic] + paa + pasf
-    intent_label, scores = infer_intent(texts)
-    st.subheader("Intent"); st.write(f"**Dominant Intent:** {intent_label}")
-
     st.subheader("Crawling Competitor Pages")
     comp_results = []
     progress = st.progress(0)
@@ -209,13 +162,10 @@ if run_btn:
         comp_results.append({"url": url, "headings": heads})
         progress.progress(i/len(organic))
 
-    brief = build_outline(keyword, paa, pasf, comp_results, intent_label)
+    brief = build_outline(keyword, paa, pasf, comp_results, threshold)
 
     st.subheader("Content Brief (Clustered Outline)")
-    md_preview = io.StringIO()
-    for item in brief["outline"]:
-        md_preview.write(f"{'#'*item['level']} {item['title']}\n\n")
-    st.code(md_preview.getvalue(), language="markdown")
+    st.code(outline_to_markdown(brief), language="markdown")
 
     st.download_button("⬇️ Download Markdown", data=outline_to_markdown(brief),
                        file_name=f"{re.sub(r'[^a-zA-Z0-9_-]+','-',keyword)}-brief.md")
