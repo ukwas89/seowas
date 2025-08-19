@@ -3,10 +3,10 @@
 # SEO SERP Analyzer & Content Brief — Streamlit app
 #
 # Features
-# 1) Query Google via SerpAPI for a given keyword (top 10 + PAA)
+# 1) Query Google via SerpAPI for a given keyword (top 10 + PAA + PASF)
 # 2) Analyze current SERP & infer dominant intent
-# 3) Crawl each ranking page and extract H1–H4
-# 4) Compile a data‑driven, SEO‑optimized content brief outline
+# 3) Crawl each ranking page and extract H1–H6
+# 4) Compile a data-driven, SEO-optimized content brief outline
 # 5) Export brief as Markdown or JSON
 #
 # Deployment
@@ -53,8 +53,8 @@ USER_AGENT = (
 )
 
 INTENT_RULES = [
-    {"label": "Transactional", "match": [r"\\bbuy\\b", r"price|pricing|cost", r"coupon|deal|discount", r"\\bbest\\b", r"\\bvs\\b"]},
-    {"label": "Commercial", "match": [r"\\bbest\\b", r"\\btop\\b", r"review|compare", r"alternatives?", r"software|tools?"]},
+    {"label": "Transactional", "match": [r"\bbuy\b", r"price|pricing|cost", r"coupon|deal|discount", r"\bbest\b", r"\bvs\b"]},
+    {"label": "Commercial", "match": [r"\bbest\b", r"\btop\b", r"review|compare", r"alternatives?", r"software|tools?"]},
     {"label": "Informational", "match": [r"what|how|why|guide|tutorial|examples?|learn|definition"]},
     {"label": "Navigational", "match": [r"login|dashboard|official|homepage|site|download"]},
 ]
@@ -105,20 +105,19 @@ def infer_intent(texts: List[str]) -> Tuple[str, Dict[str, int]]:
 def extract_headings_from_html(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
     headings = []
-    for level in ["h1", "h2", "h3", "h4"]:
+    for level in ["h1", "h2", "h3", "h4", "h5", "h6"]:
         for tag in soup.find_all(level):
             text = " ".join(tag.get_text(" ", strip=True).split())
             if text:
                 headings.append({"level": int(level[1]), "title": text})
-    return headings[:400]
+    return headings[:600]
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def crawl_url(url: str) -> List[Dict]:
-    """Fetch a page and extract H1–H4 headings. Resilient to common issues."""
+    """Fetch a page and extract H1–H6 headings. Resilient to common issues."""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
-        # Some sites block; simple retry with a different UA header
         if resp.status_code >= 400:
             alt_headers = HEADERS.copy()
             alt_headers["User-Agent"] = USER_AGENT.replace("Chrome/124", "Chrome/120")
@@ -128,29 +127,28 @@ def crawl_url(url: str) -> List[Dict]:
     except requests.RequestException:
         pass
 
-    # Fallback: use Jina Reader to fetch simplified page (often Markdown-like)
+    # Fallback: Jina Reader
     try:
         reader_url = f"https://r.jina.ai/http/{url}"
         r = requests.get(reader_url, headers={"User-Agent": USER_AGENT}, timeout=20)
         if r.ok and r.text:
-            # Heading lines start with #
             lines = r.text.split("\n")
             heads = []
             for line in lines:
-                m = re.match(r"^(#{1,4})\s+(.+)$", line.strip())
+                m = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
                 if m:
                     level = len(m.group(1))
                     title = m.group(2).strip().strip("# ")
                     heads.append({"level": level, "title": title})
             if heads:
-                return heads[:400]
+                return heads[:600]
     except requests.RequestException:
         pass
 
     return []
 
 
-def build_outline(keyword: str, paa: List[str], competitor_headings: List[Dict], intent_label: str) -> Dict:
+def build_outline(keyword: str, paa: List[str], pasf: List[str], competitor_headings: List[Dict], intent_label: str) -> Dict:
     # Title & Meta
     title_suffix = {
         "Informational": "Complete Guide",
@@ -160,51 +158,33 @@ def build_outline(keyword: str, paa: List[str], competitor_headings: List[Dict],
     }.get(intent_label, "Complete Guide")
 
     title = f"{keyword}: {title_suffix}"
-    meta = (
-        f"Actionable, up-to-date guide to {keyword}. Covers key questions, comparisons, and tips to match user intent."
-    )
+    meta = f"Actionable, up-to-date guide to {keyword}. Covers key questions, comparisons, and tips to match user intent."
 
     outline = [{"level": 1, "title": title}]
-    outline += [
-        {"level": 2, "title": f"What is {keyword}?"},
-        {"level": 3, "title": f"Why {keyword} matters"},
-    ]
 
-    # Merge competitor H2/H3 clusters
-    h2s: List[str] = []
-    h3_map: Dict[str, List[str]] = {}
-
+    # Add competitor headings (H1–H6)
     for comp in competitor_headings:
+        url = comp.get("url")
         heads = comp.get("headings", [])
-        # Track last seen H2 to attach H3s
-        last_h2 = None
-        for h in heads:
-            lvl = h.get("level")
-            t = h.get("title", "").strip()
-            if not t:
-                continue
-            if lvl == 2:
-                h2s.append(t)
-                last_h2 = t
-            elif lvl == 3:
-                parent = last_h2 or "Additional Sections"
-                h3_map.setdefault(parent, []).append(t)
+        if heads:
+            outline.append({"level": 2, "title": f"Competitor Outline from {url}"})
+            for h in heads:
+                outline.append({"level": min(h.get("level", 2) + 1, 6), "title": h.get("title", "")})
 
-    top_h2s = [t for t in dedupe(h2s) if len(t) < 120][:10]
-    for h2 in top_h2s:
-        outline.append({"level": 2, "title": h2})
-        for h3 in dedupe(h3_map.get(h2, []))[:6]:
-            outline.append({"level": 3, "title": h3})
-
+    # Add People Also Ask
     if paa:
-        outline.append({"level": 2, "title": "FAQs"})
-        for q in paa[:10]:
+        outline.append({"level": 2, "title": "People Also Ask"})
+        for q in paa[:15]:
             outline.append({"level": 3, "title": q})
 
-    outline += [
-        {"level": 2, "title": "Conclusion"},
-        {"level": 3, "title": f"Key takeaways about {keyword}"},
-    ]
+    # Add People Also Search For
+    if pasf:
+        outline.append({"level": 2, "title": "People Also Search For"})
+        for term in pasf[:15]:
+            outline.append({"level": 3, "title": term})
+
+    outline.append({"level": 2, "title": "Conclusion"})
+    outline.append({"level": 3, "title": f"Key takeaways about {keyword}"})
 
     return {"title": title, "meta": meta, "outline": outline}
 
@@ -260,11 +240,7 @@ if run_btn:
             st.stop()
 
     organic = [
-        {
-            "title": o.get("title"),
-            "snippet": o.get("snippet") or " ".join(o.get("snippet_highlighted_words", []) or []),
-            "link": o.get("link"),
-        }
+        {"title": o.get("title"), "snippet": o.get("snippet") or " ".join(o.get("snippet_highlighted_words", []) or []), "link": o.get("link")}
         for o in (serp.get("organic_results") or [])[:10]
     ]
 
@@ -276,13 +252,17 @@ if run_btn:
                 paa_candidates.append(qtext)
     paa = dedupe(paa_candidates)
 
+    pasf_candidates = []
+    for k in ("related_searches", "people_also_search_for"):
+        for item in (serp.get(k) or []):
+            term = item.get("query") or item.get("title")
+            if term:
+                pasf_candidates.append(term)
+    pasf = dedupe(pasf_candidates)
+
     st.subheader("Top 10 Organic Results")
     if organic:
-        st.dataframe(
-            [{"#": i + 1, **o} for i, o in enumerate(organic)],
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe([{"#": i + 1, **o} for i, o in enumerate(organic)], use_container_width=True, hide_index=True)
     else:
         st.info("No organic results were returned by SerpAPI.")
 
@@ -290,23 +270,23 @@ if run_btn:
         st.subheader("People Also Ask (PAA)")
         st.write("\n".join([f"• {q}" for q in paa]))
 
-    # Intent analysis
-    texts = [keyword] + [x["title"] for x in organic if x.get("title")] + [x.get("snippet", "") for x in organic] + paa
+    if pasf:
+        st.subheader("People Also Search For (PASF)")
+        st.write("\n".join([f"• {t}" for t in pasf]))
+
+    texts = [keyword] + [x["title"] for x in organic if x.get("title")] + [x.get("snippet", "") for x in organic] + paa + pasf
     intent_label, scores = infer_intent(texts)
 
     st.subheader("Intent (heuristic)")
     cols = st.columns(4)
-    intents = ["Informational", "Commercial", "Transactional", "Navigational"]
-    for i, name in enumerate(intents):
+    for i, name in enumerate(["Informational", "Commercial", "Transactional", "Navigational"]):
         cols[i].metric(name, scores.get(name, 0))
     st.markdown(f"**Dominant Intent:** {intent_label}")
 
-    # Crawl competitor pages
-    st.subheader("Crawling Competitor Pages (H1–H4)")
+    st.subheader("Crawling Competitor Pages (H1–H6)")
     comp_results = []
     progress = st.progress(0)
     status = st.empty()
-
     total = len(organic)
     for i, item in enumerate(organic, start=1):
         url = item.get("link")
@@ -315,10 +295,8 @@ if run_btn:
         comp_results.append({"url": url, "headings": heads})
         progress.progress(i / max(total, 1))
         time.sleep(0.1)
-
     status.write("Done.")
 
-    # Show headings per URL
     for comp in comp_results:
         with st.expander(f"{comp['url']}  —  {len(comp['headings'])} headings"):
             if comp["headings"]:
@@ -326,26 +304,24 @@ if run_btn:
             else:
                 st.write("No headings found or page blocked crawling.")
 
-    # Build content brief
-    brief = build_outline(keyword, paa, comp_results, intent_label)
+    brief = build_outline(keyword, paa, pasf, comp_results, intent_label)
 
     st.subheader("Content Brief (Outline)")
     st.markdown(f"### {brief['title']}")
     st.markdown(f"> {brief['meta']}")
 
-    # Render outline as nested markdown-like view
     md_preview = io.StringIO()
     for item in brief["outline"]:
         md_preview.write(f"{'#' * item['level']} {item['title']}\n\n")
     st.code(md_preview.getvalue(), language="markdown")
 
-    # Downloads
     md = outline_to_markdown(brief)
     payload = {
         "keyword": keyword,
         "intent": {"label": intent_label, "scores": scores},
         "results": organic,
         "paa": paa,
+        "pasf": pasf,
         "competitor_headings": comp_results,
         "brief": brief,
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -357,7 +333,6 @@ if run_btn:
         file_name=f"{re.sub(r'[^a-zA-Z0-9_-]+', '-', keyword.strip())}-brief.md",
         mime="text/markdown",
     )
-
     st.download_button(
         "⬇️ Download JSON",
         data=json.dumps(payload, indent=2),
@@ -365,10 +340,10 @@ if run_btn:
         mime="application/json",
     )
 
-    st.success("Brief generated. You can tweak intent rules or sections in code as needed.")
+    st.success("Brief generated with H1–H6, PAA, and PASF.")
 
 # -------------------------------------------------------------
-# requirements.txt (create a file with the lines below)
+# requirements.txt
 # -------------------------------------------------------------
 # streamlit
 # requests
