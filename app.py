@@ -1,716 +1,375 @@
-import streamlit as st
-import sys
-import subprocess
+# streamlit_app.py
+# -------------------------------------------------------------
+# SEO SERP Analyzer & Content Brief — Streamlit app
+#
+# Features
+# 1) Query Google via SerpAPI for a given keyword (top 10 + PAA)
+# 2) Analyze current SERP & infer dominant intent
+# 3) Crawl each ranking page and extract H1–H4
+# 4) Compile a data‑driven, SEO‑optimized content brief outline
+# 5) Export brief as Markdown or JSON
+#
+# Deployment
+# - Add your SerpAPI key to Streamlit Secrets (recommended):
+#   In Streamlit Cloud, set a secret named SERPAPI_KEY.
+#   Locally, create .streamlit/secrets.toml with: SERPAPI_KEY = "YOUR_KEY"
+#
+# - Run locally:  streamlit run streamlit_app.py
+# - Required packages (see bottom of file for requirements list)
+# -------------------------------------------------------------
+
+import io
 import json
 import re
 import time
-from collections import Counter
-from urllib.parse import urlparse
+from datetime import datetime
+from typing import Dict, List, Tuple
 
-# Try to install missing packages automatically
-def install_package(package):
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-# Check for required packages and install if missing
-required_packages = {
-    'bs4': 'beautifulsoup4',
-    'requests': 'requests',
-    'pandas': 'pandas'
-}
-
-missing_packages = []
-
-for import_name, package_name in required_packages.items():
-    try:
-        __import__(import_name)
-    except ImportError:
-        missing_packages.append(package_name)
-        # Try to install the package
-        if install_package(package_name):
-            st.success(f"Successfully installed {package_name}")
-            missing_packages.remove(package_name)
-
-if missing_packages:
-    st.error(f"The following packages are required but could not be installed: {', '.join(missing_packages)}")
-    st.error("Please ensure these packages are in your requirements.txt file:")
-    for package in missing_packages:
-        st.code(f"{package}")
-    st.stop()
-
-# Now import the required packages
-from bs4 import BeautifulSoup
 import requests
-import pandas as pd
+from bs4 import BeautifulSoup
+import streamlit as st
 
-# Set page configuration
+# ----------------------------
+# UI CONFIG
+# ----------------------------
 st.set_page_config(
-    page_title="SEO Content Brief Generator",
-    page_icon="📊",
-    layout="wide"
+    page_title="SEO SERP Analyzer & Content Brief",
+    page_icon="📈",
+    layout="wide",
 )
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1E88E5;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .section-header {
-        font-size: 1.5rem;
-        color: #0D47A1;
-        margin-top: 1.5rem;
-        margin-bottom: 0.5rem;
-    }
-    .intent-card {
-        background-color: #E3F2FD;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    .outline-card {
-        background-color: #F5F5F5;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    .faq-card {
-        background-color: #E8F5E9;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    .keyword-highlight {
-        background-color: #FFEB3B;
-        padding: 0.2rem 0.4rem;
-        border-radius: 0.25rem;
-        font-weight: bold;
-    }
-    .installation-note {
-        background-color: #FFF8E1;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-        border-left: 4px solid #FFC107;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.title("📈 SEO SERP Analyzer & Content Brief")
+st.caption(
+    "Search a keyword via SerpAPI, analyze the SERP & PAA, crawl competitor headings, and generate a data-driven content brief."
+)
 
-class SEOContentBriefGenerator:
-    def __init__(self, serpapi_key):
-        self.serpapi_key = serpapi_key
-        self.serp_results = None
-        self.competitor_headings = {}
-        
-    def collect_serp_data(self, keyword, location="us", gl="us", hl="en"):
-        params = {
-            "engine": "google",
-            "q": keyword,
-            "location": location,
-            "gl": gl,
-            "hl": hl,
-            "api_key": self.serpapi_key,
-            "num": 10
-        }
-        
-        try:
-            response = requests.get("https://serpapi.com/search", params=params)
-            response.raise_for_status()
-            search = response.json()
-            self.serp_results = search
-            
-            organic_results = search.get("organic_results", [])[:10]
-            
-            paa_questions = []
-            related_questions = search.get("related_questions", [])
-            for question in related_questions:
-                paa_questions.append(question.get("question", ""))
-            
-            serp_data = {
-                "keyword": keyword,
-                "organic_results": [],
-                "paa_questions": paa_questions
-            }
-            
-            for result in organic_results:
-                serp_data["organic_results"].append({
-                    "title": result.get("title", ""),
-                    "meta_description": result.get("snippet", ""),
-                    "url": result.get("link", ""),
-                    "position": result.get("position", 0)
-                })
-            
-            return serp_data
-            
-        except Exception as e:
-            st.error(f"Error collecting SERP data: {e}")
-            return None
-    
-    def analyze_search_intent(self, serp_data):
-        if not serp_data:
-            return None
-            
-        intent_keywords = {
-            "informational": ["how to", "what is", "why", "guide", "tutorial", "ways to", "tips", "learn"],
-            "commercial": ["best", "review", "comparison", "vs", "top", "rating", "buy"],
-            "transactional": ["buy", "purchase", "order", "deal", "discount", "cheap", "price"],
-            "navigational": ["login", "signin", "official", "website", "app", "download"]
-        }
-        
-        intent_scores = {intent: 0 for intent in intent_keywords}
-        
-        for result in serp_data["organic_results"]:
-            text_to_analyze = (result["title"] + " " + result["meta_description"]).lower()
-            
-            for intent, keywords in intent_keywords.items():
-                for keyword in keywords:
-                    if keyword in text_to_analyze:
-                        intent_scores[intent] += 1
-        
-        dominant_intent = max(intent_scores, key=intent_scores.get)
-        
-        all_titles = [result["title"] for result in serp_data["organic_results"]]
-        all_descriptions = [result["meta_description"] for result in serp_data["organic_results"]]
-        
-        title_words = " ".join(all_titles).lower()
-        title_words = re.findall(r'\b\w+\b', title_words)
-        title_word_freq = Counter(title_words).most_common(10)
-        
-        desc_words = " ".join(all_descriptions).lower()
-        desc_words = re.findall(r'\b\w+\b', desc_words)
-        desc_word_freq = Counter(desc_words).most_common(10)
-        
-        url_patterns = []
-        for result in serp_data["organic_results"]:
-            parsed_url = urlparse(result["url"])
-            path_parts = [part for part in parsed_url.path.split('/') if part]
-            if path_parts:
-                url_patterns.extend(path_parts)
-        
-        url_pattern_freq = Counter(url_patterns).most_common(5)
-        
-        return {
-            "dominant_intent": dominant_intent,
-            "intent_scores": intent_scores,
-            "common_title_words": title_word_freq,
-            "common_description_words": desc_word_freq,
-            "common_url_patterns": url_pattern_freq,
-            "paa_questions": serp_data["paa_questions"]
-        }
-    
-    def extract_headings_from_url(self, url):
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
-            
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            headings = {"h1": [], "h2": [], "h3": [], "h4": [], "h5": [], "h6": []}
-            
-            for level in headings:
-                for heading in soup.find_all(level):
-                    text = heading.get_text().strip()
-                    if text:
-                        headings[level].append(text)
-            
-            return headings
-            
-        except Exception as e:
-            st.warning(f"Error extracting headings from {url}: {e}")
-            return {"h1": [], "h2": [], "h3": [], "h4": [], "h5": [], "h6": []}
-    
-    def extract_competitor_headings(self, serp_data):
-        if not serp_data:
-            return None
-            
-        competitor_headings = {}
-        
-        for result in serp_data["organic_results"]:
-            url = result["url"]
-            with st.spinner(f"Extracting headings from: {url}"):
-                headings = self.extract_headings_from_url(url)
-                competitor_headings[url] = headings
-                time.sleep(1)  # Add delay to avoid overwhelming servers
-            
-        self.competitor_headings = competitor_headings
-        return competitor_headings
-    
-    def analyze_competitor_headings(self):
-        if not self.competitor_headings:
-            return None
-            
-        all_headings = {"h1": [], "h2": [], "h3": [], "h4": [], "h5": [], "h6": []}
-        
-        for url, headings in self.competitor_headings.items():
-            for level in all_headings:
-                all_headings[level].extend(headings[level])
-        
-        common_headings = {}
-        for level in all_headings:
-            if all_headings[level]:
-                heading_freq = Counter(all_headings[level]).most_common(10)
-                common_headings[level] = heading_freq
-        
-        return {
-            "all_headings": all_headings,
-            "common_headings": common_headings
-        }
-    
-    def generate_content_brief(self, keyword, serp_data, intent_analysis, headings_analysis):
-        if not serp_data or not intent_analysis:
-            return None
-            
-        title_suggestion = self._generate_title_suggestion(keyword, intent_analysis)
-        meta_description_suggestion = self._generate_meta_description_suggestion(keyword, intent_analysis)
-        content_outline = self._generate_content_outline(keyword, intent_analysis, headings_analysis)
-        faq_section = self._generate_faq_section(intent_analysis["paa_questions"])
-        key_topics = self._extract_key_topics(intent_analysis, headings_analysis)
-        
-        content_brief = {
-            "keyword": keyword,
-            "title_suggestion": title_suggestion,
-            "meta_description_suggestion": meta_description_suggestion,
-            "search_intent_analysis": {
-                "dominant_intent": intent_analysis["dominant_intent"],
-                "intent_scores": intent_analysis["intent_scores"]
-            },
-            "content_outline": content_outline,
-            "faq_section": faq_section,
-            "key_topics": key_topics,
-            "serp_patterns": {
-                "common_title_words": intent_analysis["common_title_words"],
-                "common_description_words": intent_analysis["common_description_words"],
-                "common_url_patterns": intent_analysis["common_url_patterns"]
-            },
-            "competitor_insights": {
-                "common_headings": headings_analysis["common_headings"] if headings_analysis else {}
-            }
-        }
-        
-        return content_brief
-    
-    def _generate_title_suggestion(self, keyword, intent_analysis):
-        dominant_intent = intent_analysis["dominant_intent"]
-        
-        power_words = {
-            "informational": ["Ultimate", "Complete", "Comprehensive", "Definitive", "Essential"],
-            "commercial": ["Best", "Top", "Premium", "Review", "Comparison"],
-            "transactional": ["Buy", "Purchase", "Deal", "Discount", "Affordable"],
-            "navigational": ["Official", "Login", "Access", "Download", "Sign Up"]
-        }
-        
-        power_word = power_words.get(dominant_intent, ["Guide"])[0]
-        
-        title_suggestion = f"{power_word} Guide to {keyword}: Everything You Need to Know"
-        
-        common_words = [word for word, count in intent_analysis["common_title_words"][:3] 
-                       if word.lower() not in [kw.lower() for kw in keyword.split()]]
-        
-        if common_words:
-            title_suggestion = f"{power_word} {common_words[0].title()} for {keyword}: {common_words[1].title() if len(common_words) > 1 else 'Complete'} Guide"
-        
-        return title_suggestion
-    
-    def _generate_meta_description_suggestion(self, keyword, intent_analysis):
-        dominant_intent = intent_analysis["dominant_intent"]
-        
-        common_words = [word for word, count in intent_analysis["common_description_words"][:5]]
-        
-        if dominant_intent == "informational":
-            meta_desc = f"Looking for information about {keyword}? Our comprehensive guide covers everything you need to know. Learn about {', '.join(common_words[:3])} and more."
-        elif dominant_intent == "commercial":
-            meta_desc = f"Searching for the best {keyword}? We've reviewed and compared the top options. Find out which {common_words[0] if common_words else 'product'} is right for you."
-        elif dominant_intent == "transactional":
-            meta_desc = f"Ready to buy {keyword}? Find the best deals and prices on {common_words[0] if common_words else 'quality products'}. Shop now and save!"
-        else:  # navigational
-            meta_desc = f"Looking for the official {keyword} website? Find direct access to {', '.join(common_words[:2]) if common_words else 'the resources you need'} here."
-        
-        if len(meta_desc) > 160:
-            meta_desc = meta_desc[:157] + "..."
-        
-        return meta_desc
-    
-    def _generate_content_outline(self, keyword, intent_analysis, headings_analysis):
-        dominant_intent = intent_analysis["dominant_intent"]
-        
-        common_h2s = []
-        if headings_analysis and "common_headings" in headings_analysis and "h2" in headings_analysis["common_headings"]:
-            common_h2s = [heading for heading, count in headings_analysis["common_headings"]["h2"][:5]]
-        
-        outline = {
-            "h1": f"The Ultimate Guide to {keyword}",
-            "sections": []
-        }
-        
-        outline["sections"].append({
-            "h2": "Introduction to " + keyword,
-            "content": "Brief overview of what the article will cover and why the topic is important."
-        })
-        
-        if dominant_intent == "informational":
-            outline["sections"].extend([
-                {
-                    "h2": "What Is " + keyword + "?",
-                    "content": "Definition and basic explanation of the concept.",
-                    "subsections": [
-                        {"h3": "Key Components of " + keyword, "content": "Break down the main elements."},
-                        {"h3": "How " + keyword + " Works", "content": "Explanation of the mechanism or process."}
-                    ]
-                },
-                {
-                    "h2": "Benefits of " + keyword,
-                    "content": "List and explain the main advantages.",
-                    "subsections": [
-                        {"h3": "Primary Benefits", "content": "Most important advantages."},
-                        {"h3": "Secondary Benefits", "content": "Additional advantages."}
-                    ]
-                },
-                {
-                    "h2": "Common Challenges with " + keyword,
-                    "content": "Discuss potential issues and how to overcome them."
-                }
-            ])
-            
-            for h2 in common_h2s:
-                if not any(section["h2"] == h2 for section in outline["sections"]):
-                    outline["sections"].append({
-                        "h2": h2,
-                        "content": "Cover this important aspect of " + keyword
-                    })
-            
-            outline["sections"].append({
-                "h2": "Conclusion",
-                "content": "Summarize key points and provide final thoughts."
-            })
-            
-        elif dominant_intent == "commercial":
-            outline["sections"].extend([
-                {
-                    "h2": "Top " + keyword + " Options",
-                    "content": "Overview of the best products/services in this category.",
-                    "subsections": [
-                        {"h3": "Best Overall", "content": "Top recommendation and why."},
-                        {"h3": "Best Value", "content": "Best option for the price."},
-                        {"h3": "Premium Choice", "content": "High-end option for those with bigger budgets."}
-                    ]
-                },
-                {
-                    "h2": "Comparison of " + keyword + " Features",
-                    "content": "Side-by-side comparison of key features.",
-                    "subsections": [
-                        {"h3": "Feature Comparison Table", "content": "Visual comparison of products."},
-                        {"h3": "Performance Analysis", "content": "How each option performs."}
-                    ]
-                },
-                {
-                    "h2": "Pros and Cons",
-                    "content": "Detailed list of advantages and disadvantages for each option."
-                }
-            ])
-            
-            for h2 in common_h2s:
-                if not any(section["h2"] == h2 for section in outline["sections"]):
-                    outline["sections"].append({
-                        "h2": h2,
-                        "content": "Cover this important aspect of " + keyword
-                    })
-            
-            outline["sections"].append({
-                "h2": "Final Recommendation",
-                "content": "Clear recommendation based on different use cases and needs."
-            })
-            
-        elif dominant_intent == "transactional":
-            outline["sections"].extend([
-                {
-                    "h2": "Where to Buy " + keyword,
-                    "content": "Best places to purchase this product/service.",
-                    "subsections": [
-                        {"h3": "Official Retailers", "content": "Authorized sellers."},
-                        {"h3": "Online Marketplaces", "content": "E-commerce options."}
-                    ]
-                },
-                {
-                    "h2": "Current Deals and Discounts",
-                    "content": "Latest promotions and special offers.",
-                    "subsections": [
-                        {"h3": "Seasonal Sales", "content": "Holiday and event-based discounts."},
-                        {"h3": "Coupon Codes", "content": "Available promo codes."}
-                    ]
-                },
-                {
-                    "h2": "Price Comparison",
-                    "content": "Compare prices across different retailers."
-                }
-            ])
-            
-            for h2 in common_h2s:
-                if not any(section["h2"] == h2 for section in outline["sections"]):
-                    outline["sections"].append({
-                        "h2": h2,
-                        "content": "Cover this important aspect of " + keyword
-                    })
-            
-            outline["sections"].append({
-                "h2": "Best Value for Money",
-                "content": "Final recommendation on where to get the best deal."
-            })
-            
-        else:  # navigational
-            outline["sections"].extend([
-                {
-                    "h2": "How to Access " + keyword,
-                    "content": "Step-by-step instructions to reach the destination.",
-                    "subsections": [
-                        {"h3": "Direct Link", "content": "Official URL."},
-                        {"h3": "Alternative Access Methods", "content": "Other ways to reach the site/service."}
-                    ]
-                },
-                {
-                    "h2": "Account Setup",
-                    "content": "How to create an account if needed."
-                },
-                {
-                    "h2": "Troubleshooting Access Issues",
-                    "content": "Common problems and solutions."
-                }
-            ])
-            
-            for h2 in common_h2s:
-                if not any(section["h2"] == h2 for section in outline["sections"]):
-                    outline["sections"].append({
-                        "h2": h2,
-                        "content": "Cover this important aspect of " + keyword
-                    })
-            
-            outline["sections"].append({
-                "h2": "Getting Started",
-                "content": "Next steps after accessing the site/service."
-            })
-        
-        return outline
-    
-    def _generate_faq_section(self, paa_questions):
-        if not paa_questions:
-            return {"h2": "Frequently Asked Questions", "questions": []}
-        
-        faq_section = {
-            "h2": "Frequently Asked Questions",
-            "questions": []
-        }
-        
-        for question in paa_questions[:5]:
-            faq_section["questions"].append({
-                "question": question,
-                "answer": "Provide a comprehensive answer to this question based on research and expertise."
-            })
-        
-        return faq_section
-    
-    def _extract_key_topics(self, intent_analysis, headings_analysis):
-        key_topics = []
-        
-        title_words = [word for word, count in intent_analysis["common_title_words"][:5]]
-        key_topics.extend(title_words)
-        
-        desc_words = [word for word, count in intent_analysis["common_description_words"][:5]]
-        key_topics.extend(desc_words)
-        
-        if headings_analysis and "common_headings" in headings_analysis and "h2" in headings_analysis["common_headings"]:
-            common_h2s = [heading for heading, count in headings_analysis["common_headings"]["h2"][:5]]
-            key_topics.extend(common_h2s)
-        
-        return list(set(key_topics))
-    
-    def generate_seo_content_brief(self, keyword):
-        st.write(f"Generating SEO content brief for keyword: **{keyword}**")
-        
-        # Step 1: Collect SERP data
-        with st.spinner("Step 1: Collecting SERP data..."):
-            serp_data = self.collect_serp_data(keyword)
-            if not serp_data:
-                st.error("Failed to collect SERP data.")
-                return None
-        
-        # Step 2: Analyze search intent
-        with st.spinner("Step 2: Analyzing search intent..."):
-            intent_analysis = self.analyze_search_intent(serp_data)
-        
-        # Step 4: Extract competitor headings
-        with st.spinner("Step 4: Extracting competitor headings..."):
-            competitor_headings = self.extract_competitor_headings(serp_data)
-        
-        # Analyze competitor headings
-        with st.spinner("Analyzing competitor headings..."):
-            headings_analysis = self.analyze_competitor_headings()
-        
-        # Step 3 & 5: Generate content brief
-        with st.spinner("Step 3 & 5: Generating content brief..."):
-            content_brief = self.generate_content_brief(keyword, serp_data, intent_analysis, headings_analysis)
-        
-        st.success("SEO content brief generated successfully!")
-        return content_brief
+# ----------------------------
+# HELPERS & CONSTANTS
+# ----------------------------
+SERP_API_ENDPOINT = "https://serpapi.com/search.json"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
-def display_content_brief(content_brief):
-    if not content_brief:
-        return
-    
-    # Display title and meta description
-    st.markdown('<div class="section-header">Title & Meta Description</div>', unsafe_allow_html=True)
-    st.markdown(f"**Suggested Title:**\n\n> {content_brief['title_suggestion']}")
-    st.markdown(f"**Suggested Meta Description:**\n\n> {content_brief['meta_description_suggestion']}")
-    
-    # Display search intent analysis
-    st.markdown('<div class="section-header">Search Intent Analysis</div>', unsafe_allow_html=True)
-    with st.container():
-        st.markdown('<div class="intent-card">', unsafe_allow_html=True)
-        st.markdown(f"**Dominant Intent:** {content_brief['search_intent_analysis']['dominant_intent'].title()}")
-        
-        st.markdown("**Intent Scores:**")
-        intent_df = pd.DataFrame(
-            list(content_brief['search_intent_analysis']['intent_scores'].items()),
-            columns=['Intent Type', 'Score']
-        )
-        st.bar_chart(intent_df.set_index('Intent Type'))
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Display content outline
-    st.markdown('<div class="section-header">Content Outline</div>', unsafe_allow_html=True)
-    with st.container():
-        st.markdown('<div class="outline-card">', unsafe_allow_html=True)
-        st.markdown(f"### {content_brief['content_outline']['h1']}")
-        
-        for section in content_brief['content_outline']['sections']:
-            st.markdown(f"#### {section['h2']}")
-            st.write(section['content'])
-            
-            if 'subsections' in section:
-                for subsection in section['subsections']:
-                    st.markdown(f"##### {subsection['h3']}")
-                    st.write(subsection['content'])
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Display FAQ section
-    st.markdown('<div class="section-header">FAQ Section</div>', unsafe_allow_html=True)
-    with st.container():
-        st.markdown('<div class="faq-card">', unsafe_allow_html=True)
-        st.markdown(f"### {content_brief['faq_section']['h2']}")
-        
-        for qa in content_brief['faq_section']['questions']:
-            st.markdown(f"**Q:** {qa['question']}")
-            st.markdown(f"**A:** {qa['answer']}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Display key topics
-    st.markdown('<div class="section-header">Key Topics to Cover</div>', unsafe_allow_html=True)
-    topics_df = pd.DataFrame(content_brief['key_topics'], columns=['Key Topics'])
-    st.dataframe(topics_df)
-    
-    # Display SERP patterns
-    st.markdown('<div class="section-header">SERP Patterns</div>', unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns(3)
-    
+INTENT_RULES = [
+    {"label": "Transactional", "match": [r"\\bbuy\\b", r"price|pricing|cost", r"coupon|deal|discount", r"\\bbest\\b", r"\\bvs\\b"]},
+    {"label": "Commercial", "match": [r"\\bbest\\b", r"\\btop\\b", r"review|compare", r"alternatives?", r"software|tools?"]},
+    {"label": "Informational", "match": [r"what|how|why|guide|tutorial|examples?|learn|definition"]},
+    {"label": "Navigational", "match": [r"login|dashboard|official|homepage|site|download"]},
+]
+
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+
+
+def dedupe(seq: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in seq:
+        if x and x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_serp(keyword: str, api_key: str, hl: str = "en", gl: str = "us", num: int = 10) -> Dict:
+    """Fetch Google SERP via SerpAPI."""
+    params = {
+        "engine": "google",
+        "q": keyword,
+        "num": num,
+        "hl": hl,
+        "gl": gl,
+        "api_key": api_key,
+    }
+    r = requests.get(SERP_API_ENDPOINT, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def infer_intent(texts: List[str]) -> Tuple[str, Dict[str, int]]:
+    scores = {"Informational": 0, "Commercial": 0, "Transactional": 0, "Navigational": 0}
+    for t in texts:
+        if not t:
+            continue
+        for rule in INTENT_RULES:
+            for pattern in rule["match"]:
+                if re.search(pattern, t, flags=re.I):
+                    scores[rule["label"]] += 1
+    # Pick highest
+    label = max(scores.items(), key=lambda kv: kv[1])[0]
+    return label, scores
+
+
+def extract_headings_from_html(html: str) -> List[Dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    headings = []
+    for level in ["h1", "h2", "h3", "h4"]:
+        for tag in soup.find_all(level):
+            text = " ".join(tag.get_text(" ", strip=True).split())
+            if text:
+                headings.append({"level": int(level[1]), "title": text})
+    return headings[:400]
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def crawl_url(url: str) -> List[Dict]:
+    """Fetch a page and extract H1–H4 headings. Resilient to common issues."""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        # Some sites block; simple retry with a different UA header
+        if resp.status_code >= 400:
+            alt_headers = HEADERS.copy()
+            alt_headers["User-Agent"] = USER_AGENT.replace("Chrome/124", "Chrome/120")
+            resp = requests.get(url, headers=alt_headers, timeout=20)
+        if resp.ok and resp.text:
+            return extract_headings_from_html(resp.text)
+    except requests.RequestException:
+        pass
+
+    # Fallback: use Jina Reader to fetch simplified page (often Markdown-like)
+    try:
+        reader_url = f"https://r.jina.ai/http/{url}"
+        r = requests.get(reader_url, headers={"User-Agent": USER_AGENT}, timeout=20)
+        if r.ok and r.text:
+            # Heading lines start with #
+            lines = r.text.split("\n")
+            heads = []
+            for line in lines:
+                m = re.match(r"^(#{1,4})\s+(.+)$", line.strip())
+                if m:
+                    level = len(m.group(1))
+                    title = m.group(2).strip().strip("# ")
+                    heads.append({"level": level, "title": title})
+            if heads:
+                return heads[:400]
+    except requests.RequestException:
+        pass
+
+    return []
+
+
+def build_outline(keyword: str, paa: List[str], competitor_headings: List[Dict], intent_label: str) -> Dict:
+    # Title & Meta
+    title_suffix = {
+        "Informational": "Complete Guide",
+        "Commercial": "Top Picks, Comparisons & FAQs",
+        "Transactional": "Pricing, Options & How to Choose",
+        "Navigational": "Everything You Need to Know",
+    }.get(intent_label, "Complete Guide")
+
+    title = f"{keyword}: {title_suffix}"
+    meta = (
+        f"Actionable, up-to-date guide to {keyword}. Covers key questions, comparisons, and tips to match user intent."
+    )
+
+    outline = [{"level": 1, "title": title}]
+    outline += [
+        {"level": 2, "title": f"What is {keyword}?"},
+        {"level": 3, "title": f"Why {keyword} matters"},
+    ]
+
+    # Merge competitor H2/H3 clusters
+    h2s: List[str] = []
+    h3_map: Dict[str, List[str]] = {}
+
+    for comp in competitor_headings:
+        heads = comp.get("headings", [])
+        # Track last seen H2 to attach H3s
+        last_h2 = None
+        for h in heads:
+            lvl = h.get("level")
+            t = h.get("title", "").strip()
+            if not t:
+                continue
+            if lvl == 2:
+                h2s.append(t)
+                last_h2 = t
+            elif lvl == 3:
+                parent = last_h2 or "Additional Sections"
+                h3_map.setdefault(parent, []).append(t)
+
+    top_h2s = [t for t in dedupe(h2s) if len(t) < 120][:10]
+    for h2 in top_h2s:
+        outline.append({"level": 2, "title": h2})
+        for h3 in dedupe(h3_map.get(h2, []))[:6]:
+            outline.append({"level": 3, "title": h3})
+
+    if paa:
+        outline.append({"level": 2, "title": "FAQs"})
+        for q in paa[:10]:
+            outline.append({"level": 3, "title": q})
+
+    outline += [
+        {"level": 2, "title": "Conclusion"},
+        {"level": 3, "title": f"Key takeaways about {keyword}"},
+    ]
+
+    return {"title": title, "meta": meta, "outline": outline}
+
+
+def outline_to_markdown(brief: Dict) -> str:
+    md = f"# {brief['title']}\n\n> {brief['meta']}\n\n"
+    for item in brief["outline"]:
+        md += f"{'#' * item['level']} {item['title']}\n\n"
+    return md
+
+
+# ----------------------------
+# SIDEBAR CONTROLS
+# ----------------------------
+with st.sidebar:
+    st.header("Settings")
+
+    default_key = st.secrets.get("SERPAPI_KEY", "") if hasattr(st, "secrets") else ""
+    api_key = st.text_input("SerpAPI Key", type="password", value=default_key)
+
+    keyword = st.text_input("Keyword", placeholder="e.g., best project management software")
+
+    col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Common Title Words**")
-        title_words_df = pd.DataFrame(
-            content_brief['serp_patterns']['common_title_words'],
-            columns=['Word', 'Frequency']
-        )
-        st.dataframe(title_words_df)
-    
+        hl = st.text_input("hl (language)", value="en")
     with col2:
-        st.markdown("**Common Description Words**")
-        desc_words_df = pd.DataFrame(
-            content_brief['serp_patterns']['common_description_words'],
-            columns=['Word', 'Frequency']
-        )
-        st.dataframe(desc_words_df)
-    
-    with col3:
-        st.markdown("**Common URL Patterns**")
-        url_patterns_df = pd.DataFrame(
-            content_brief['serp_patterns']['common_url_patterns'],
-            columns=['Pattern', 'Frequency']
-        )
-        st.dataframe(url_patterns_df)
-    
-    # Display competitor insights
-    st.markdown('<div class="section-header">Competitor Insights</div>', unsafe_allow_html=True)
-    
-    if 'h2' in content_brief['competitor_insights']['common_headings']:
-        st.markdown("**Common H2 Headings**")
-        h2_df = pd.DataFrame(
-            content_brief['competitor_insights']['common_headings']['h2'],
-            columns=['Heading', 'Frequency']
-        )
-        st.dataframe(h2_df)
-    
-    if 'h3' in content_brief['competitor_insights']['common_headings']:
-        st.markdown("**Common H3 Headings**")
-        h3_df = pd.DataFrame(
-            content_brief['competitor_insights']['common_headings']['h3'],
-            columns=['Heading', 'Frequency']
-        )
-        st.dataframe(h3_df)
+        gl = st.text_input("gl (country)", value="us")
 
-def main():
-    st.markdown('<div class="main-header">SEO Content Brief Generator</div>', unsafe_allow_html=True)
-    st.markdown("Generate data-driven SEO content briefs by analyzing Google search results.")
-    
-    # Installation note
-    st.markdown('<div class="installation-note">', unsafe_allow_html=True)
-    st.markdown("**Note for GitHub Deployment**: This app requires several Python packages. If you see errors about missing packages, please ensure you have a `requirements.txt` file with all dependencies listed.')
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Sidebar for API key and inputs
-    st.sidebar.title("Configuration")
-    
-    # Get SERPAPI key
-    serpapi_key = st.sidebar.text_input("Enter your SERPAPI Key", type="password")
-    
-    # Get keyword input
-    keyword = st.text_input("Enter Keyword to Analyze")
-    
-    # Generate button
-    generate_button = st.button("Generate SEO Content Brief")
-    
-    if generate_button:
-        if not serpapi_key:
-            st.error("Please enter your SERPAPI key.")
-            return
-        
-        if not keyword:
-            st.error("Please enter a keyword to analyze.")
-            return
-        
-        # Initialize the generator
-        generator = SEOContentBriefGenerator(serpapi_key)
-        
-        # Generate the content brief
-        content_brief = generator.generate_seo_content_brief(keyword)
-        
-        # Display the content brief
-        if content_brief:
-            display_content_brief(content_brief)
-            
-            # Add download button for JSON
-            json_str = json.dumps(content_brief, indent=2)
-            st.download_button(
-                label="Download Brief as JSON",
-                data=json_str,
-                file_name=f"{keyword.replace(' ', '_')}_seo_brief.json",
-                mime="application/json"
-            )
+    run_btn = st.button("Run Analysis", type="primary")
 
-if __name__ == "__main__":
-    main()
+    st.markdown("---")
+    st.caption("For production: add SERPAPI_KEY in secrets. Crawling is server-side here.")
+
+# ----------------------------
+# MAIN WORKFLOW
+# ----------------------------
+if run_btn:
+    if not api_key:
+        st.error("Please provide a SerpAPI key (in sidebar).")
+        st.stop()
+    if not keyword:
+        st.error("Please enter a keyword.")
+        st.stop()
+
+    with st.spinner("Fetching SERP from SerpAPI…"):
+        try:
+            serp = get_serp(keyword, api_key, hl=hl, gl=gl, num=10)
+        except requests.HTTPError as e:
+            st.error(f"SerpAPI error: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Unexpected error calling SerpAPI: {e}")
+            st.stop()
+
+    organic = [
+        {
+            "title": o.get("title"),
+            "snippet": o.get("snippet") or " ".join(o.get("snippet_highlighted_words", []) or []),
+            "link": o.get("link"),
+        }
+        for o in (serp.get("organic_results") or [])[:10]
+    ]
+
+    paa_candidates = []
+    for k in ("related_questions", "people_also_ask"):
+        for q in (serp.get(k) or []):
+            qtext = q.get("question") or q.get("title")
+            if qtext:
+                paa_candidates.append(qtext)
+    paa = dedupe(paa_candidates)
+
+    st.subheader("Top 10 Organic Results")
+    if organic:
+        st.dataframe(
+            [{"#": i + 1, **o} for i, o in enumerate(organic)],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No organic results were returned by SerpAPI.")
+
+    if paa:
+        st.subheader("People Also Ask (PAA)")
+        st.write("\n".join([f"• {q}" for q in paa]))
+
+    # Intent analysis
+    texts = [keyword] + [x["title"] for x in organic if x.get("title")] + [x.get("snippet", "") for x in organic] + paa
+    intent_label, scores = infer_intent(texts)
+
+    st.subheader("Intent (heuristic)")
+    cols = st.columns(4)
+    intents = ["Informational", "Commercial", "Transactional", "Navigational"]
+    for i, name in enumerate(intents):
+        cols[i].metric(name, scores.get(name, 0))
+    st.markdown(f"**Dominant Intent:** {intent_label}")
+
+    # Crawl competitor pages
+    st.subheader("Crawling Competitor Pages (H1–H4)")
+    comp_results = []
+    progress = st.progress(0)
+    status = st.empty()
+
+    total = len(organic)
+    for i, item in enumerate(organic, start=1):
+        url = item.get("link")
+        status.write(f"Fetching: {url}")
+        heads = crawl_url(url) if url else []
+        comp_results.append({"url": url, "headings": heads})
+        progress.progress(i / max(total, 1))
+        time.sleep(0.1)
+
+    status.write("Done.")
+
+    # Show headings per URL
+    for comp in comp_results:
+        with st.expander(f"{comp['url']}  —  {len(comp['headings'])} headings"):
+            if comp["headings"]:
+                st.dataframe(comp["headings"], use_container_width=True, hide_index=True)
+            else:
+                st.write("No headings found or page blocked crawling.")
+
+    # Build content brief
+    brief = build_outline(keyword, paa, comp_results, intent_label)
+
+    st.subheader("Content Brief (Outline)")
+    st.markdown(f"### {brief['title']}")
+    st.markdown(f"> {brief['meta']}")
+
+    # Render outline as nested markdown-like view
+    md_preview = io.StringIO()
+    for item in brief["outline"]:
+        md_preview.write(f"{'#' * item['level']} {item['title']}\n\n")
+    st.code(md_preview.getvalue(), language="markdown")
+
+    # Downloads
+    md = outline_to_markdown(brief)
+    payload = {
+        "keyword": keyword,
+        "intent": {"label": intent_label, "scores": scores},
+        "results": organic,
+        "paa": paa,
+        "competitor_headings": comp_results,
+        "brief": brief,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    st.download_button(
+        "⬇️ Download Markdown",
+        data=md,
+        file_name=f"{re.sub(r'[^a-zA-Z0-9_-]+', '-', keyword.strip())}-brief.md",
+        mime="text/markdown",
+    )
+
+    st.download_button(
+        "⬇️ Download JSON",
+        data=json.dumps(payload, indent=2),
+        file_name=f"{re.sub(r'[^a-zA-Z0-9_-]+', '-', keyword.strip())}-brief.json",
+        mime="application/json",
+    )
+
+    st.success("Brief generated. You can tweak intent rules or sections in code as needed.")
+
+# -------------------------------------------------------------
+# requirements.txt (create a file with the lines below)
+# -------------------------------------------------------------
+# streamlit
+# requests
+# beautifulsoup4
