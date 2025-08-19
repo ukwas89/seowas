@@ -1,12 +1,38 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+import sys
+import importlib
 import json
 import re
-from urllib.parse import urlparse
-import pandas as pd
-from collections import Counter
 import time
+from collections import Counter
+from urllib.parse import urlparse
+
+# Check for required packages and install if missing
+required_packages = {
+    'bs4': 'beautifulsoup4',
+    'requests': 'requests',
+    'pandas': 'pandas'
+}
+
+missing_packages = []
+
+for import_name, package_name in required_packages.items():
+    try:
+        importlib.import_module(import_name)
+    except ImportError:
+        missing_packages.append(package_name)
+
+if missing_packages:
+    st.error(f"The following packages are required but not installed: {', '.join(missing_packages)}")
+    st.error("Please install them using pip:")
+    for package in missing_packages:
+        st.code(f"pip install {package}")
+    st.stop()
+
+# Now import the required packages
+from bs4 import BeautifulSoup
+import requests
+import pandas as pd
 
 # Set page configuration
 st.set_page_config(
